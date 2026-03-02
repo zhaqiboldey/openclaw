@@ -234,6 +234,8 @@ export {
   sendMediaWithLeadingCaption,
 } from "./reply-payload.js";
 export type { OutboundReplyPayload } from "./reply-payload.js";
+export type { OutboundMediaLoadOptions } from "./outbound-media.js";
+export { loadOutboundMediaFromUrl } from "./outbound-media.js";
 export { resolveChannelAccountConfigBasePath } from "./config-paths.js";
 export { buildMediaPayload } from "../channels/plugins/media-payload.js";
 export type { MediaPayload, MediaPayloadInput } from "../channels/plugins/media-payload.js";
@@ -242,13 +244,18 @@ export { chunkTextForOutbound } from "./text-chunking.js";
 export { readJsonFileWithFallback, writeJsonFileAtomically } from "./json-store.js";
 export { buildRandomTempFilePath, withTempDownloadPath } from "./temp-path.js";
 export {
+  applyWindowsSpawnProgramPolicy,
   materializeWindowsSpawnProgram,
   resolveWindowsExecutablePath,
+  resolveWindowsSpawnProgramCandidate,
   resolveWindowsSpawnProgram,
 } from "./windows-spawn.js";
 export type {
+  ResolveWindowsSpawnProgramCandidateParams,
   ResolveWindowsSpawnProgramParams,
+  WindowsSpawnCandidateResolution,
   WindowsSpawnInvocation,
+  WindowsSpawnProgramCandidate,
   WindowsSpawnProgram,
   WindowsSpawnResolution,
 } from "./windows-spawn.js";
