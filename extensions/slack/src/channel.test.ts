@@ -16,6 +16,10 @@ vi.mock("./runtime.js", () => ({
 import { slackPlugin } from "./channel.js";
 
 describe("slackPlugin actions", () => {
+  it("prefers session lookup for announce target routing", () => {
+    expect(slackPlugin.meta.preferSessionLookupForAnnounceTarget).toBe(true);
+  });
+
   it("forwards read threadId to Slack action handler", async () => {
     handleSlackActionMock.mockResolvedValueOnce({ messages: [], hasMore: false });
     const handleAction = slackPlugin.actions?.handleAction;
@@ -107,7 +111,7 @@ describe("slackPlugin outbound", () => {
 });
 
 describe("slackPlugin config", () => {
-  it("treats HTTP mode accounts with bot token + signing secret as configured", () => {
+  it("treats HTTP mode accounts with bot token + signing secret as configured", async () => {
     const cfg: OpenClawConfig = {
       channels: {
         slack: {
@@ -120,13 +124,17 @@ describe("slackPlugin config", () => {
 
     const account = slackPlugin.config.resolveAccount(cfg, "default");
     const configured = slackPlugin.config.isConfigured?.(account, cfg);
-    const snapshot = slackPlugin.status?.buildAccountSnapshot?.({ account, runtime: undefined });
+    const snapshot = await slackPlugin.status?.buildAccountSnapshot?.({
+      account,
+      cfg,
+      runtime: undefined,
+    });
 
     expect(configured).toBe(true);
     expect(snapshot?.configured).toBe(true);
   });
 
-  it("keeps socket mode requiring app token", () => {
+  it("keeps socket mode requiring app token", async () => {
     const cfg: OpenClawConfig = {
       channels: {
         slack: {
@@ -138,7 +146,11 @@ describe("slackPlugin config", () => {
 
     const account = slackPlugin.config.resolveAccount(cfg, "default");
     const configured = slackPlugin.config.isConfigured?.(account, cfg);
-    const snapshot = slackPlugin.status?.buildAccountSnapshot?.({ account, runtime: undefined });
+    const snapshot = await slackPlugin.status?.buildAccountSnapshot?.({
+      account,
+      cfg,
+      runtime: undefined,
+    });
 
     expect(configured).toBe(false);
     expect(snapshot?.configured).toBe(false);
