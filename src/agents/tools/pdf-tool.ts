@@ -1,30 +1,23 @@
-import { type Api, type Context, complete, type Model } from "@mariozechner/pi-ai";
+import { type Context, complete } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawConfig } from "../../config/config.js";
 import { extractPdfContent, type PdfExtractedContent } from "../../media/pdf-extract.js";
 import { resolveUserPath } from "../../utils.js";
-import { getDefaultLocalRoots, loadWebMediaRaw } from "../../web/media.js";
-import { ensureAuthProfileStore, listProfilesForProvider } from "../auth-profiles.js";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
-import { getApiKeyForModel, requireApiKey, resolveEnvApiKey } from "../model-auth.js";
-import { runWithImageModelFallback } from "../model-fallback.js";
-import { resolveConfiguredModelRef } from "../model-selection.js";
-import { ensureOpenClawModelsJson } from "../models-config.js";
-import { discoverAuthStorage, discoverModels } from "../pi-model-discovery.js";
-import {
-  createSandboxBridgeReadFile,
-  resolveSandboxedBridgeMediaPath,
-  type SandboxedBridgeMediaPathConfig,
-} from "../sandbox-media-paths.js";
-import type { SandboxFsBridge } from "../sandbox/fs-bridge.js";
-import type { ToolFsPolicy } from "../tool-fs-policy.js";
-import { normalizeWorkspaceDir } from "../workspace-dir.js";
-import type { AnyAgentTool } from "./common.js";
+import { loadWebMediaRaw } from "../../web/media.js";
 import {
   coerceImageModelConfig,
   type ImageModelConfig,
   resolveProviderVisionModelFromConfig,
 } from "./image-tool.helpers.js";
+import {
+  applyImageModelConfigDefaults,
+  buildTextToolResult,
+  resolveModelFromRegistry,
+  resolveMediaToolLocalRoots,
+  resolveModelRuntimeApiKey,
+  resolvePromptAndModelOverride,
+} from "./media-tool-shared.js";
+import { hasAuthForProvider, resolveDefaultModelRef } from "./model-config.helpers.js";
 import { anthropicAnalyzePdf, geminiAnalyzePdf } from "./pdf-native-providers.js";
 import {
   coercePdfAssistantText,
@@ -33,6 +26,18 @@ import {
   providerSupportsNativePdf,
   resolvePdfToolMaxTokens,
 } from "./pdf-tool.helpers.js";
+import {
+  createSandboxBridgeReadFile,
+  discoverAuthStorage,
+  discoverModels,
+  ensureOpenClawModelsJson,
+  resolveSandboxedBridgeMediaPath,
+  runWithImageModelFallback,
+  type AnyAgentTool,
+  type SandboxedBridgeMediaPathConfig,
+  type SandboxFsBridge,
+  type ToolFsPolicy,
+} from "./tool-runtime.helpers.js";
 
 const DEFAULT_PROMPT = "Analyze this PDF document.";
 const DEFAULT_MAX_PDFS = 10;
@@ -47,26 +52,6 @@ const PDF_MAX_PIXELS = 4_000_000;
 // ---------------------------------------------------------------------------
 // Model resolution (mirrors image tool pattern)
 // ---------------------------------------------------------------------------
-
-function resolveDefaultModelRef(cfg?: OpenClawConfig): { provider: string; model: string } {
-  if (cfg) {
-    const resolved = resolveConfiguredModelRef({
-      cfg,
-      defaultProvider: DEFAULT_PROVIDER,
-      defaultModel: DEFAULT_MODEL,
-    });
-    return { provider: resolved.provider, model: resolved.model };
-  }
-  return { provider: DEFAULT_PROVIDER, model: DEFAULT_MODEL };
-}
-
-function hasAuthForProvider(params: { provider: string; agentDir: string }): boolean {
-  if (resolveEnvApiKey(params.provider)?.apiKey) {
-    return true;
-  }
-  const store = ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false });
-  return listProfilesForProvider(store, params.provider).length > 0;
-}
 
 /**
  * Resolve the effective PDF model config.
@@ -196,18 +181,7 @@ async function runPdfPrompt(params: {
   native: boolean;
   attempts: Array<{ provider: string; model: string; error: string }>;
 }> {
-  const effectiveCfg: OpenClawConfig | undefined = params.cfg
-    ? {
-        ...params.cfg,
-        agents: {
-          ...params.cfg.agents,
-          defaults: {
-            ...params.cfg.agents?.defaults,
-            imageModel: params.pdfModelConfig,
-          },
-        },
-      }
-    : undefined;
+  const effectiveCfg = applyImageModelConfigDefaults(params.cfg, params.pdfModelConfig);
 
   await ensureOpenClawModelsJson(effectiveCfg, params.agentDir);
   const authStorage = discoverAuthStorage(params.agentDir);
@@ -225,18 +199,13 @@ async function runPdfPrompt(params: {
     cfg: effectiveCfg,
     modelOverride: params.modelOverride,
     run: async (provider, modelId) => {
-      const model = modelRegistry.find(provider, modelId) as Model<Api> | null;
-      if (!model) {
-        throw new Error(`Unknown model: ${provider}/${modelId}`);
-      }
-
-      const apiKeyInfo = await getApiKeyForModel({
+      const model = resolveModelFromRegistry({ modelRegistry, provider, modelId });
+      const apiKey = await resolveModelRuntimeApiKey({
         model,
         cfg: effectiveCfg,
         agentDir: params.agentDir,
+        authStorage,
       });
-      const apiKey = requireApiKey(apiKeyInfo, model.provider);
-      authStorage.setRuntimeApiKey(model.provider, apiKey);
 
       if (providerSupportsNativePdf(provider)) {
         if (params.pageNumbers && params.pageNumbers.length > 0) {
@@ -358,14 +327,9 @@ export function createPdfTool(options?: {
       ? Math.floor(maxPagesDefault)
       : DEFAULT_MAX_PAGES;
 
-  const localRoots = (() => {
-    const roots = getDefaultLocalRoots();
-    const workspaceDir = normalizeWorkspaceDir(options?.workspaceDir);
-    if (!workspaceDir) {
-      return roots;
-    }
-    return Array.from(new Set([...roots, workspaceDir]));
-  })();
+  const localRoots = resolveMediaToolLocalRoots(options?.workspaceDir, {
+    workspaceOnly: options?.fsPolicy?.workspaceOnly === true,
+  });
 
   const description =
     "Analyze one or more PDF documents with a model. Supports native PDF analysis for Anthropic and Google models, with text/image extraction fallback for other providers. Use pdf for a single path/URL, or pdfs for multiple (up to 10). Provide a prompt describing what to analyze.";
@@ -429,12 +393,10 @@ export function createPdfTool(options?: {
         };
       }
 
-      const promptRaw =
-        typeof record.prompt === "string" && record.prompt.trim()
-          ? record.prompt.trim()
-          : DEFAULT_PROMPT;
-      const modelOverride =
-        typeof record.model === "string" && record.model.trim() ? record.model.trim() : undefined;
+      const { prompt: promptRaw, modelOverride } = resolvePromptAndModelOverride(
+        record,
+        DEFAULT_PROMPT,
+      );
       const maxBytesMbRaw = typeof record.maxBytesMb === "number" ? record.maxBytesMb : undefined;
       const maxBytesMb =
         typeof maxBytesMbRaw === "number" && Number.isFinite(maxBytesMbRaw) && maxBytesMbRaw > 0
@@ -590,15 +552,7 @@ export function createPdfTool(options?: {
               })),
             };
 
-      return {
-        content: [{ type: "text", text: result.text }],
-        details: {
-          model: `${result.provider}/${result.model}`,
-          native: result.native,
-          ...pdfDetails,
-          attempts: result.attempts,
-        },
-      };
+      return buildTextToolResult(result, { native: result.native, ...pdfDetails });
     },
   };
 }
